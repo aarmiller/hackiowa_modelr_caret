@@ -1,0 +1,178 @@
+---
+title: "Machine Learning with modelr and caret"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+This document provides the necessary syntax...
+
+Important Note: this tutorial is based on the introductions to modelr and caret, created by Hadley Wickham and Max Kuhn, respectively. (I have copied their basic layouts along with a number of specific examples.) Additional information can be found at: https://github.com/tidyverse/modelr. If you have a continued interest in using R for statistical/machine learning or would like additional information on the caret package I highly recomend the book "Applied Predictive Modeling"
+
+Before we begin you should install and load the following packages:
+```{r message=FALSE}
+library(tidyverse)
+library(modelr)
+library(caret)
+library(mlbench)
+```
+
+## Data 
+
+```{r}
+data("cars", package = "caret")
+glimpse(cars)
+cars <- as_tibble(cars)
+```
+
+
+## Data partitioning
+
+The modelr package utilizes the `resample` class to create data partitions/samples. A `resample` object simply stores integer values that point back the the rows of the original data. Note: this can save a ton of space! We can create a resample object using `resample()`, view its pointer values by calling `as.integer()` or convert it to a data frame.
+
+```{r}
+rs <- resample(cars, 1:10)
+as.integer(rs)
+as.data.frame(rs)
+```
+
+We can easily create training, test or validation sets using `resample_partition()`
+
+``` {r}
+ex <- resample_partition(cars, c(test = 0.3, train = 0.7))
+ex
+```
+
+We can manully fit a model by refering to the training data `ex$train`
+
+``` {r}
+mod <- lm(Price ~ Mileage + Doors + Cylinder, data = ex$train)
+summary(mod)
+```
+
+We could then make predictions using the model
+
+```{r}
+predict(mod,ex$train) %>% 
+  head()
+```
+
+```{r}
+test <- ex$test %>% 
+  as_tibble()
+```
+
+```{r}
+test %>% 
+  mutate(fit=predict(mod,test)) %>% 
+  glimpse()
+```
+
+Manually computing performance
+
+```{r}
+test %>% 
+  mutate(pred=predict(mod,test)) %>% 
+  summarise(rmse=sqrt(mean((Price-fit)^2)))
+```
+
+Helper function in modelr
+
+```{r}
+test %>% 
+  add_predictions(mod) %>% 
+  glimpse()
+```
+
+
+``` {r}
+rmse(mod,test)
+rmse(mod,ex$test)
+rsquare(mod,ex$test)
+mae(mod,ex$test)
+```
+
+
+## Cross-Validation using map function
+
+```{r}
+folds <- crossv_kfold(cars, k = 5)
+```
+
+We now have to use the map function to apply a model to each training set
+
+```{r}
+folds <- folds %>% 
+  mutate(model=map(train,~lm(Price ~ Mileage + Doors + Cylinder, data=.)))
+```
+
+```{r}
+folds %>% 
+  mutate(insamp_rmse=map2_dbl(model,train,~rmse(.x,.y))) %>% 
+  mutate(outsample_rmse=map2_dbl(model,test,~rmse(.x,.y)))
+```
+
+``` {r}
+
+```
+
+
+## Parsimony with caret
+
+The statistical/machine learning environment in r is strung out across a variety of different packages, with many utilizing a unique syntax and set of data structures. The caret pacakge attemps to synchronize these packages using a consistent syntax.
+
+The 
+
+``` {r message=FALSE}
+data(Sonar)
+ctrl <- trainControl(method="cv", 
+                     summaryFunction=twoClassSummary, 
+                     classProbs=T,
+                     savePredictions = T)
+
+set.seed(1234)
+rf_fit <- train(Class ~ ., 
+                data=Sonar, 
+                method="rf", 
+                preProc=c("center", "scale"), 
+                trControl=ctrl)
+```
+
+## Go Parallel
+
+```{r}
+
+```
+
+
+"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
