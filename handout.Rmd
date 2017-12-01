@@ -1,6 +1,8 @@
 ---
 title: "Machine Learning with modelr and caret"
-output: html_document
+output:
+  html_document: default
+  pdf_document: default
 ---
 
 ```{r setup, include=FALSE}
@@ -9,20 +11,29 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ## Introduction
 
-This document provides the necessary syntax...
-
-Important Note: this tutorial is based on the introductions to modelr and caret, created by Hadley Wickham and Max Kuhn, respectively. (I have copied their basic layouts along with a number of specific examples.) Additional information can be found at: https://github.com/tidyverse/modelr. If you have a continued interest in using R for statistical/machine learning or would like additional information on the caret package I highly recomend the book "Applied Predictive Modeling"
+This document provides an introduction for using the `modelr` and `caret` packages for machine learning. Important Note: this tutorial is based on the introductions to modelr and caret, created by Hadley Wickham and Max Kuhn, respectively. (I have copied their basic layouts along with a number of specific examples.) Additional information can be found at: https://github.com/tidyverse/modelr. If you have a continued interest in using R for statistical/machine learning or would like additional information on the caret package I highly recomend the book "Applied Predictive Modeling"
 
 Before we begin you should install and load the following packages:
 ```{r message=FALSE}
+#install.packages("tidyverse")
+#install.packages("modelR")
+#install.packages("caret")
+#install.packages("mlbench")
+#install.packages("pROC")
+#install.packages("parallel")
+#install.packages("doParallel")
 library(tidyverse)
 library(modelr)
 library(caret)
 library(mlbench)
+library(pROC)
+library(parallel)
+library(doParallel)
 ```
 
 ## Data 
 
+Let's start off by loading some data from the caret package. The cars dataset contains information on Kelly Blue Book resale values for used cars. We can use the `glimpse` function
 ```{r}
 data("cars", package = "caret")
 glimpse(cars)
@@ -36,16 +47,19 @@ The modelr package utilizes the `resample` class to create data partitions/sampl
 
 ```{r}
 rs <- resample(cars, 1:10)
+rs
 as.integer(rs)
-as.data.frame(rs)
+as_tibble(rs)
 ```
 
-We can easily create training, test or validation sets using `resample_partition()`
+We can easily create training, test or validation sets using `resample_partition()`. This function allows us to specify the names and size of our training and test sets.
 
 ``` {r}
 ex <- resample_partition(cars, c(test = 0.3, train = 0.7))
 ex
 ```
+
+## Basic Model Building
 
 We can manully fit a model by refering to the training data `ex$train`
 
@@ -54,98 +68,251 @@ mod <- lm(Price ~ Mileage + Doors + Cylinder, data = ex$train)
 summary(mod)
 ```
 
-We could then make predictions using the model
+We could then make predictions with the model using the `predict` function.
 
 ```{r}
 predict(mod,ex$train) %>% 
   head()
 ```
 
+Let's create a test set and add the predictions to it.
 ```{r}
 test <- ex$test %>% 
-  as_tibble()
-```
-
-```{r}
-test %>% 
-  mutate(fit=predict(mod,test)) %>% 
+  as_tibble() %>% 
+  mutate(pred=predict(mod,ex$test)) %>% 
   glimpse()
 ```
 
-Manually computing performance
+
+
+We can then manually compute performance (e.g., RMSE) using summarise.
 
 ```{r}
 test %>% 
-  mutate(pred=predict(mod,test)) %>% 
-  summarise(rmse=sqrt(mean((Price-fit)^2)))
+  summarise(rmse=sqrt(mean((Price-pred)^2)))
 ```
 
-Helper function in modelr
+## Helper function in modelr
+The modelr package contains a variety of helper functions that can simplify model evaluation. For example, we can use the `add_predictions` function to add a column containing the predicted values.
 
 ```{r}
-test %>% 
+as_tibble(ex$test) %>% 
   add_predictions(mod) %>% 
   glimpse()
 ```
 
-
+Often we do not need to manually store a colum of predicted values. Instead, we might simply be interested in returning evaluation metrics such as rmse (root mean square error), r-squared values or mae (mean absolute error). The modelr package allows us to quickly compute many metrics using resample objects.
 ``` {r}
-rmse(mod,test)
 rmse(mod,ex$test)
+rmse(mod,ex$train)
 rsquare(mod,ex$test)
+rsquare(mod,ex$train)
 mae(mod,ex$test)
+mae(mod,ex$train)
 ```
 
 
 ## Cross-Validation using map function
 
+For performance evaluation it is often preferable to create many samples, training and hold-out sets, then evaluation performance across the multiple sets. One way to do this is with k-fold cross validation. In k-fold CV, the data is partitioned into k equally sized fold. Then for each of the fold, the selected fold is treated as a test set while the remaining folds are treated as the training set. This creates a total of k different samples to evaluate performance on. The `crossv_kfold` can be used to perform k-fold CV.
+
 ```{r}
-folds <- crossv_kfold(cars, k = 5)
+cv_folds <- crossv_kfold(cars, k = 5, id="fold")
 ```
 
-We now have to use the map function to apply a model to each training set
+Notice that the crossv_kfold function creates a tibble with columns containing train/test resample obejects and a fold id. Recall that tibbles are quite flexible and columns can contain a range of differing data types. 
+
+To evaluate model performance on each of the folds we now have to use the map function to apply a model to each training set.
+
+Before using the map function, a quick sidenote on how the map function works. The map function takes two arguments, a vector (or vectors) and a fuction, and then applies the function to each element in the vector(s). This allows us to constuct loops in a functional programing manner. For example, if we wanted to loop over the first 10 numbers and add 5 to each.
 
 ```{r}
-folds <- folds %>% 
+map(1:10, ~.+5)
+```
+The `~` inside the map function allows us to specify exactly how the function should operate. In this case we add the value we are iterating over "." to "5". Notice that this returns values in the form of a list. If we wanted an numeric vector we could have used `map_dbl` (similarly `map_chr`, `map_int`, `map_lgl`). 
+
+```{r}
+map_dbl(1:10, ~.+5)
+```
+
+Returning to the issue of maping a regression model to each of our training folds, we simply call the map function from inside of the mutate function. This will allow us to appy a regression model, row-by-row, to each of the training folds inside `cv_folds.` Inside of the map function we specify the column containing the training data, then the function (i.e. regression model) to apply to that dataset.
+```{r}
+cv_folds <- cv_folds %>% 
   mutate(model=map(train,~lm(Price ~ Mileage + Doors + Cylinder, data=.)))
 ```
 
+By calling the `cv_folds` object we can now see that the model column is composed of rows containing the respective models we created.
 ```{r}
-folds %>% 
+cv_folds
+cv_folds$model
+```
+
+Now that we have a model stored for each of our training folds, we can again use the map function to return an RMSE value evaluating each of our models on the respective test and training folds. Since the rmse function requires two arguments (i.e. model and dataset), we need to use the `map2` function to pass two arguments. We can also switch to the `map2_dbl` function to retun the values as a numeric vector. Notice, that when we use `map2` the two arguments passed to the function are refered to by '.x' and '.y' instead of '.'
+```{r}
+cv_folds <- cv_folds %>% 
   mutate(insamp_rmse=map2_dbl(model,train,~rmse(.x,.y))) %>% 
   mutate(outsample_rmse=map2_dbl(model,test,~rmse(.x,.y)))
+cv_folds
 ```
 
+We could then summarise the aggregate performance.
 ``` {r}
-
+cv_folds %>% 
+  summarise(mean_insamp=mean(insamp_rmse),
+            mean_outsamp=mean(outsample_rmse))
 ```
 
+
+In each of the above steps, we have stored each of the intermediate steps in the process of model evaluation. Chaining using the `%>%` opperator can quickly allow us to perform many operations without ever having to store much information. For example, if we simply wanted to view the aggregated results of a 5-fold cross validation, we could do this in one step without having to store any data in our global environment.
+``` {r}
+crossv_kfold(cars, k = 5, id="fold") %>% 
+  mutate(model=map(train,~lm(Price ~ Mileage + Doors + Cylinder, data=.))) %>% 
+  mutate(insamp_rmse=map2_dbl(model,train,~rmse(.x,.y))) %>% 
+  mutate(outsample_rmse=map2_dbl(model,test,~rmse(.x,.y))) %>% 
+  summarise(mean_insamp=mean(insamp_rmse),
+            mean_outsamp=mean(outsample_rmse))
+  
+```
+
+You can wrap a map function around all of this to perform a repeated cross validation without ever having to write a loop!
+``` {r}
+tibble(n=1:10) %>% 
+  mutate(results=map(n,~crossv_kfold(cars, k = 5, id="fold") %>% 
+                       mutate(model=map(train,~lm(Price ~ Mileage + Doors + Cylinder, data=.))) %>% 
+                       mutate(insamp_rmse=map2_dbl(model,train,~rmse(.x,.y))) %>% 
+                       mutate(outsample_rmse=map2_dbl(model,test,~rmse(.x,.y))) %>% 
+                       summarise(mean_insamp=mean(insamp_rmse),
+                                 mean_outsamp=mean(outsample_rmse)))) %>% 
+  unnest()
+```
 
 ## Parsimony with caret
 
-The statistical/machine learning environment in r is strung out across a variety of different packages, with many utilizing a unique syntax and set of data structures. The caret pacakge attemps to synchronize these packages using a consistent syntax.
+The statistical/machine learning environment in r is strung out across a variety of different packages, with many utilizing a unique syntax and set of data structures. It is entirely possible to use the modelr appoach outlined above to manually implement any of the machine learning methods/algorithms in R. In some cases it is necessary to do so, as the above appoach can be adapted to perform complex tasks that many packages may not allow. However, when you want to compare a variety of methods/models The caret pacakge attemps to synchronize the many machine/statistical learning packages in R using a consistent syntax.
 
-The 
+Data pre-processing, feature selection, model tuning, parameter estimation, and performance evaluation can all be done using a consistent syntax within the caret package. I will be ignoring a large part of the modelling process; additional information regarding the caret package can be found at: http://topepo.github.io/caret/index.html. The textbook "Applied Predictive Modeling" by Max Kuhn and Kjell Johnson, also provides a very in depth coverage of predictive modelling using the `caret` package
+
+
+Let's start by loading another dataset. The Sonar dataset in the mlbench package comes from the UCI machine learning database
+``` {r}
+data(Sonar)
+?Sonar
+```
+
+The caret package essentially uses two main functions to perform (I'm glossing over many more functions to perform specific tasks): (1) `trainControl` which specifies how model training/evaluation will be performed, and (2) `train` which performes model training.
+
+The trainControl function is incredibly flexible and has . The following is specification is a good basic setup for getting started. Here we have specified that we want to use k-fold crossvalidation, with k=10 folds, which is not repeated (`repeats = 1`), we have a two class prediction problem for performance metrics, we want class probabilities to be reported, and we want predictions to be saved. The final two options are needed for generating cross-validated performance results
 
 ``` {r message=FALSE}
-data(Sonar)
-ctrl <- trainControl(method="cv", 
-                     summaryFunction=twoClassSummary, 
+ctrl <- trainControl(method="repeatedcv",
+                     number = 10,
+                     repeats = 1,
+                     summaryFunction=twoClassSummary,
                      classProbs=T,
                      savePredictions = T)
+```
 
+Let's start by trying somthing very simple. Let's use the K-Nearest Neighbors method to predict class outcome. Using the train function we specify that we want to predict Class using all features, the data set Sonar, the method "knn", we want to use "ROC" as a performance metric, we want to pre process the data by cetering and scalin (i.e. normalize), we want to use k=5 nearest neighbors as the tune grid
+
+Note: It's also important that we start by setting a seed, as we may want to reproduce our findings.
+
+``` {r message=FALSE}
 set.seed(1234)
-rf_fit <- train(Class ~ ., 
-                data=Sonar, 
-                method="rf", 
-                preProc=c("center", "scale"), 
-                trControl=ctrl)
+knn_fit <- train(Class ~ .,
+                 data=Sonar,
+                 method="knn",
+                 metric="ROC",
+                 preProc=c("center", "scale"),
+                 tuneGrid = data.frame(.k=5),
+                 trControl=ctrl)
+```
+
+Let's take a look at what gets stored behind the scenes.
+``` {r}
+head(knn_fit$pred)
+knn_fit$resample
+knn_fit$results
+```
+
+## Model Tuning
+
+Many machine learning methods/algorithms have tuning parameters that need to be "tuned" in order to achieve optimal performance. In the case of KNN this is the number of neighboring observations to be used in prediction. In the previous example, we specified that we wanted to use k=5 neighbors. However it is entirely possible that a different value for k may have performed much better. 
+
+The goal in identifying an optimal tuning parameter is the need to avoind "over-fitting," i.e. maximizing in-sample model fit at the expense of out-of-sample performance. Thus, a general strategy for choosing an optimal tuning parameter is to evaluate the out-of-sample performance for a range of parameter values across multiple training/test sets. The caret pacakge is specifically built around the idea of
+
+The following syntax can be used if we wanted to specifically evaluate tuning parameters k=3,5,7,9. 
+
+``` {r message=FALSE}
+set.seed(1234)
+knn_fit <- train(Class ~ .,
+                 data=Sonar,
+                 method="knn",
+                 metric="ROC",
+                 preProc=c("center", "scale"),
+                 tuneGrid = data.frame(.k=c(3,5,7,9)),
+                 trControl=ctrl)
+```
+
+If, instead of specifying a grid of tuning parameters, we wanted to specify a length for the number of parameters to evaluate, we can use the tuneLength option.
+``` {r message=FALSE}
+set.seed(1234)
+knn_fit <- train(Class ~ .,
+                 data=Sonar,
+                 method="knn",
+                 metric="ROC",
+                 preProc=c("center", "scale"),
+                 tuneLength = 10,
+                 trControl=ctrl)
+```
+
+
+Let's again take a look at what gets stored behind the scenes.
+``` {r}
+knn_fit$pred
+knn_fit$resample
+knn_fit$results
 ```
 
 ## Go Parallel
-
+Using the `caret` package it is easy to build models by running code in parallel. Lets start by registering a cluster.
 ```{r}
+cl <- makeCluster(detectCores()-1)
+registerDoParallel(cl)
+```
 
+Now all of the calls to the `train` function will be run in parallel.
+```{r}
+set.seed(1234)
+rf_fit <- train(Class ~ .,
+                 data=Sonar,
+                 method="rf",
+                 metric="ROC",
+                 preProc=c("center", "scale"),
+                 tuneLength = 5,
+                 trControl=ctrl)
+rf_fit
+```
+
+## Plotting ROC curves and comparing models
+
+A frequent way that we can compare performance between models is by plotting an ROC curve. This can be done easily using the `pROC` package.
+```{r}
+library(pROC)
+plot(roc(knn_fit$pred$obs,knn_fit$pred$M),legacy.axes=T)
+plot(roc(rf_fit$pred$obs,rf_fit$pred$M),legacy.axes=T, add = TRUE, lty =2)
+```
+
+## Repeated cross-validation using modelr, purr
+
+``` {r}
+tibble(n=1:10) %>% 
+  mutate(results=map(n,~crossv_kfold(cars, k = 5, id="fold") %>% 
+                       mutate(model=map(train,~lm(Price ~ Mileage + Doors + Cylinder, data=.))) %>% 
+                       mutate(insamp_rmse=map2_dbl(model,train,~rmse(.x,.y))) %>% 
+                       mutate(outsample_rmse=map2_dbl(model,test,~rmse(.x,.y))) %>% 
+                       summarise(mean_insamp=mean(insamp_rmse),
+                                 mean_outsamp=mean(outsample_rmse)))) %>% 
+  unnest()
 ```
 
 
