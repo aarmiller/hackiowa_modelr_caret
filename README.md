@@ -1,4 +1,4 @@
-# hackiowa_modelr_caret
+# Overview
 
 This repo contains the handout for the second of two R
 workshops for HackIowa at the University of Iowa. 
